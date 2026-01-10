@@ -4,3 +4,9 @@ __pycache__/
 ui-react/
 ui-streamlit/
 .DS_Store
+venv/
+__pycache__/
+*.pyc
+ui-react/
+ui-streamlit/
+.DS_Store
