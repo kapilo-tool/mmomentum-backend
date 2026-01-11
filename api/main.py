@@ -1,148 +1,136 @@
+import datetime
+import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta
+import yfinance as yf
 
+# ---------------------------------------------------------
+# Logging Setup
+# ---------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger("momentum-api")
+
+# ---------------------------------------------------------
+# FastAPI Setup
+# ---------------------------------------------------------
 app = FastAPI(
     title="Momentum API",
-    description="Berechnet Momentum-, Trend- und Volatilitätskennzahlen für Aktien.",
-    version="1.0.0",
+    description="Stabile, produktionsreife Analyse-API",
+    version="1.0.0"
 )
 
-# CORS – später passen wir die Origin auf dein Frontend an
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # für Produktion später enger machen
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ---------------------------------------------------------
+# Utility: Normalize Close Series
+# ---------------------------------------------------------
+def normalize_close(data: pd.DataFrame) -> pd.Series:
+    """
+    Stellt sicher, dass 'Close' immer eine 1D-Series ist.
+    Behandelt MultiIndex, DataFrames und inkonsistente yfinance-Ausgaben.
+    """
+    if "Close" not in data.columns:
+        raise ValueError("Daten enthalten keine 'Close'-Spalte.")
 
-class PricePoint(BaseModel):
-    date: str
-    close: float
+    close = data["Close"]
 
+    # Falls MultiIndex → flatten
+    if isinstance(close, pd.DataFrame):
+        logger.warning("MultiIndex erkannt – flattening angewendet.")
+        close = close.iloc[:, 0]
 
-class AnalyzeResponse(BaseModel):
-    ticker: str
-    score: float
-    trend: str
-    momentum: str
-    volatility: str
-    current_price: float
-    change_percent: float
-    chart: list[PricePoint]
+    # Falls Series mit mehreren Ebenen → squeeze
+    if hasattr(close, "columns"):
+        close = close.squeeze()
 
+    if not isinstance(close, pd.Series):
+        raise ValueError("Close konnte nicht in eine Series konvertiert werden.")
 
-def compute_score(history: pd.Series) -> float:
-    """Einfache Score-Logik für MVP."""
-    if len(history) < 30:
-        return 0.0
-
-    last_30 = history[-30:]
-    perf_30 = (last_30.iloc[-1] / last_30.iloc[0] - 1) * 100
-
-    returns = last_30.pct_change().dropna()
-    vol = returns.std() * (252**0.5) * 100  # annualisierte Volatilität
-
-    trend_component = 1 if history.iloc[-1] > history.iloc[0] else -1
-
-    raw_score = perf_30 * 0.6 + (20 - min(vol, 40)) * 0.3 + trend_component * 10
-
-    return round(max(min(raw_score, 100), 0), 2)
+    return close.dropna()
 
 
-def classify_trend(history: pd.Series) -> str:
-    if history.iloc[-1] > history.iloc[0]:
-        return "up"
-    elif history.iloc[-1] < history.iloc[0]:
-        return "down"
-    return "sideways"
+# ---------------------------------------------------------
+# Utility: Compute Score
+# ---------------------------------------------------------
+def compute_score(history: pd.Series) -> int:
+    if history is None or len(history) < 2:
+        return 0
+
+    first = float(history.iloc[0])
+    last = float(history.iloc[-1])
+
+    trend_component = 1 if last > first else -1
+
+    volatility = history.pct_change().std()
+    vol_component = -1 if volatility > 0.03 else 1
+
+    return trend_component + vol_component
 
 
-def classify_momentum(history: pd.Series) -> str:
-    if len(history) < 10:
-        return "weak"
-
-    last_10 = history[-10:]
-    perf_10 = (last_10.iloc[-1] / last_10.iloc[0] - 1) * 100
-
-    if perf_10 > 10:
-        return "strong"
-    elif perf_10 > 3:
-        return "medium"
-    elif perf_10 > 0:
-        return "weak"
-    else:
-        return "negative"
-
-
-def classify_volatility(history: pd.Series) -> str:
-    if len(history) < 30:
-        return "unknown"
-
-    returns = history.pct_change().dropna()
-    vol = returns.std() * (252**0.5) * 100
-
-    if vol < 20:
-        return "low"
-    elif vol < 40:
-        return "medium"
-    else:
-        return "high"
-
-
-@app.get("/analyze/{ticker}", response_model=AnalyzeResponse)
-def analyze_ticker(ticker: str):
-    ticker = ticker.upper().strip()
-    if not ticker:
-        raise HTTPException(status_code=400, detail="Ticker darf nicht leer sein.")
-
-    end = datetime.utcnow()
-    start = end - timedelta(days=200)
-
-    try:
-        data = yf.download(ticker, start=start, end=end)
-    except Exception:
-        raise HTTPException(status_code=500, detail="Fehler beim Abruf von Marktdaten.")
-
-    if data.empty or "Close" not in data.columns:
-        raise HTTPException(status_code=404, detail=f"Keine Daten für Ticker {ticker} gefunden.")
-
-    close = data["Close"].dropna()
-
-    if len(close) < 10:
-        raise HTTPException(status_code=400, detail="Nicht genug historische Daten für eine Analyse.")
-
-    score = compute_score(close)
-    trend = classify_trend(close)
-    momentum = classify_momentum(close)
-    volatility = classify_volatility(close)
-
-    current_price = float(close.iloc[-1])
-    first_price = float(close.iloc[0])
-    change_percent = round((current_price / first_price - 1) * 100, 2)
-
-    chart_points = [
-        PricePoint(date=index.strftime("%Y-%m-%d"), close=float(price))
-        for index, price in close[-90:].items()
-    ]
-
-    return AnalyzeResponse(
-        ticker=ticker,
-        score=score,
-        trend=trend,
-        momentum=momentum,
-        volatility=volatility,
-        current_price=current_price,
-        change_percent=change_percent,
-        chart=chart_points,
-    )
-
-
+# ---------------------------------------------------------
+# Route: Root
+# ---------------------------------------------------------
 @app.get("/")
 def root():
     return {"status": "ok", "message": "Momentum API läuft."}
+
+
+# ---------------------------------------------------------
+# Route: Analyze Ticker
+# ---------------------------------------------------------
+@app.get("/analyze/{ticker}")
+def analyze_ticker(ticker: str):
+    logger.info(f"Analyse gestartet für Ticker: {ticker}")
+
+    end = datetime.date.today()
+    start = end - datetime.timedelta(days=180)
+
+    try:
+        data = yf.download(
+            ticker,
+            start=start,
+            end=end,
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+            threads=False
+        )
+    except Exception as e:
+        logger.error(f"Fehler beim Laden von yfinance: {e}")
+        raise HTTPException(status_code=500, detail="Fehler beim Abrufen der Marktdaten.")
+
+    if data is None or data.empty:
+        logger.warning(f"Keine Daten für Ticker {ticker} gefunden.")
+        raise HTTPException(status_code=404, detail=f"Keine Daten für Ticker {ticker} gefunden.")
+
+    try:
+        close = normalize_close(data)
+    except Exception as e:
+        logger.error(f"Fehler bei der Normalisierung: {e}")
+        raise HTTPException(status_code=500, detail="Fehler bei der Datenverarbeitung.")
+
+    score = compute_score(close)
+
+    result = {
+        "ticker": ticker.upper(),
+        "score": score,
+        "first_close": float(close.iloc[0]),
+        "last_close": float(close.iloc[-1]),
+        "change_percent": float((close.iloc[-1] - close.iloc[0]) / close.iloc[0] * 100),
+        "data_points": len(close)
+    }
+
+    logger.info(f"Analyse abgeschlossen für {ticker}: {result}")
+
+    return result
+
