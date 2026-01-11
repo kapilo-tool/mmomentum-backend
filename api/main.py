@@ -4,6 +4,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import yfinance as yf
+import certifi
+import ssl
+ssl_context = ssl.create_default_context(cafile=certifi.where())
 
 # ---------------------------------------------------------
 # Logging Setup
@@ -95,16 +98,17 @@ def analyze_ticker(ticker: str):
     end = datetime.date.today()
     start = end - datetime.timedelta(days=180)
 
-    try:
-        data = yf.download(
-            ticker,
-            start=start,
-            end=end,
-            interval="1d",
-            progress=False,
-            auto_adjust=True,
-            threads=False
-        )
+try:
+    data = yf.download(
+        ticker,
+        start=start,
+        end=end,
+        interval="1d",
+        progress=False,
+        auto_adjust=True,
+        threads=False,
+        ssl_context=ssl_context
+    )
     except Exception as e:
         logger.error(f"Fehler beim Laden von yfinance: {e}")
         raise HTTPException(status_code=500, detail="Fehler beim Abrufen der Marktdaten.")
